@@ -1,1 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HYPE·ENGINE — AI Music Scout</title>
+<!-- ============================================================
+     HYPE ENGINE — standalone app (GitHub Pages ready)
+     McBeeHive Group LLC / TRIX$TER106
 
+     >>> FILL IN YOUR 3 VALUES BELOW (in the <script> config block) <<<
+     Then commit this file to your GitHub Pages repo as index.html.
+     ============================================================ -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Archivo:wght@400;600;800;900&display=swap');
+* { box-sizing: border-box; margin: 0; }
+html, body { background: #0a0a0c; }
+.pulse { animation: p 1.2s ease-in-out infinite; }
+@keyframes p { 0%,100%{opacity:.4} 50%{opacity:1} }
+button { font-family: 'Archivo', sans-serif; cursor: pointer; transition: transform .15s; }
+button:hover:not(:disabled) { transform: translateY(-1px); }
+input { font-family: 'Archivo', sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+// ============================================================
+// >>>>>>>>>>>  FILL IN THESE 3 VALUES  <<<<<<<<<<<
+// ============================================================
+const SUPABASE_URL  = "https://ayvxbxuedfiifttwhixc.supabase.co"; // your project URL (already filled from your project)
+const SUPABASE_ANON = "PUT_KEY_BETWEEN_THESE_QUOTES";
+const STRIPE_PRO_LINK = "https://buy.stripe.com/00waEX3Brebt5KKaKp7EQ05";
+// ============================================================
+
+const { useState, useEffect, useCallback } = React;
+const ACCENT = "#ff3b3b";
+const FREE_DAILY_SCOUTS = 6;
+
+const TIERS = [
+  { name: "STREET SCOUT", min: 0, color: "#8a8a8a" },
+  { name: "PLUG", min: 30, color: "#37c871" },
+  { name: "TASTEMAKER", min: 80, color: "#3b9dff" },
+  { name: "KINGMAKER", min: 160, color: "#b06bff", proOnly: true },
+  { name: "ORACLE", min: 300, color: "#ffb627", proOnly: true },
+];
+const SEED_VIBES = ["West Coast", "Dark trap", "Soulful boom bap", "Melodic drill", "Plugg", "G-funk revival"];
+
+function tierFor(score, isPro) {
+  let t = TIERS[0];
+  for (const tier of TIERS) {
+    if (tier.proOnly && !isPro) continue;
+    if (score >= tier.min) t = tier;
+  }
+  return t;
+}
+
+let SESSION = { token: null, uid: null, email: null };
+const sb = {
+  headers: (extra = {}) => ({
+    apikey: SUPABASE_ANON,
+    Authorization: `Bearer ${SESSION.token || SUPABASE_ANON}`,
+    "Content-Type": "application/json",
+    ...extra,
+  }),
+  async get(path) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { headers: sb.headers() });
+    return r.json();
+  },
+  async post(path, body, prefer = "return=representation") {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      method: "POST", headers: sb.headers({ Prefer: prefer }), body: JSON.stringify(body),
+    });
+    return r.json();
+  },
+  async rpc(fn, args) {
+    return fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: "POST", headers: sb.headers(), body: JSON.stringify(args),
+    });
+  },
+  async signUp(email, password) {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
+      method: "POST", headers: { apikey: SUPABASE_ANON, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    return r.json();
+  },
+  async signIn(email, password) {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+      method: "POST", headers: { apikey: SUPABASE_ANON, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    return r.json();
+  },
+};
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState({ hype_points: 0, is_pro: false });
+
+  const loadProfile = useCallback(async (uid) => {
+    const rows = await sb.get(`scouts?user_id=eq.${uid}&select=hype_points,is_pro`);
+    if (rows && rows[0]) setProfile(rows[0]);
+    else { await sb.post("scouts", { user_id: uid }, "resolution=ignore-duplicates"); setProfile({ hype_points: 0, is_pro: false }); }
+  }, []);
+
+  useEffect(() => { if (user) loadProfile(user.id); }, [user, loadProfile]);
+
+  function onAuthed(session) {
+    SESSION = { token: session.access_token, uid: session.user.id, email: session.user.email };
+    setUser({ id: session.user.id, email: session.user.email });
+  }
+  function signOut() {
+    SESSION = { token: null, uid: null, email: null };
+    setUser(null); setProfile({ hype_points: 0, is_pro: false });
+  }
+
+  return (
+    <div style={S.root}>
+      <div style={S.grain} />
+      {!user
+        ? <Auth onAuthed={onAuthed} />
+        : <Scout user={user} profile={profile} reloadProfile={() => loadProfile(user.id)} signOut={signOut} />}
+    </div>
+  );
+}
+
+function Auth({ onAuthed }) {
+  const [mode, setMode] = useState("in");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function go() {
+    setErr(""); setBusy(true);
+    try {
+      const fn = mode === "in" ? sb.signIn : sb.signUp;
+      const res = await fn(email, pw);
+      if (res.access_token) onAuthed(res);
+      else if (res.user && !res.access_token) setErr("Check your email to confirm, then sign in.");
+      else setErr(res.msg || res.error_description || res.error || "Couldn't authenticate.");
+    } catch { setErr("Network hiccup. Try again."); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={S.authWrap}>
+      <div style={S.logo}>HYPE<span style={{ color: ACCENT }}>·</span>ENGINE</div>
+      <div style={S.authSub}>AI SCOUT — by TRIX$TER106</div>
+      <div style={S.authCard}>
+        <h2 style={S.authH}>{mode === "in" ? "Welcome back, scout." : "Start scouting."}</h2>
+        <input style={S.input} placeholder="email" value={email} onChange={e => setEmail(e.target.value)} />
+        <input style={S.input} type="password" placeholder="password" value={pw} onChange={e => setPw(e.target.value)} />
+        {err ? <div style={S.err}>{err}</div> : null}
+        <button style={S.cta} disabled={busy || !email || !pw} onClick={go}>
+          {busy ? "…" : mode === "in" ? "SIGN IN →" : "CREATE ACCOUNT →"}
+        </button>
+        <div style={S.switch} onClick={() => { setMode(mode === "in" ? "up" : "in"); setErr(""); }}>
+          {mode === "in" ? "New here? Create an account" : "Got an account? Sign in"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Scout({ user, profile, reloadProfile, signOut }) {
+  const [vibes, setVibes] = useState([]);
+  const [stage, setStage] = useState("pick");
+  const [scouted, setScouted] = useState([]);
+  const [calls, setCalls] = useState({});
+  const [cardArtist, setCardArtist] = useState(null);
+  const [breakouts, setBreakouts] = useState([]);
+  const [scoutsToday, setScoutsToday] = useState(0);
+  const [paywall, setPaywall] = useState(false);
+  const [err, setErr] = useState("");
+
+  const isPro = profile.is_pro;
+  const score = profile.hype_points;
+  const tier = tierFor(score, isPro);
+  const nextTier = TIERS.find(t => t.min > score);
+
+  useEffect(() => {
+    (async () => {
+      const rows = await sb.get(`calls?user_id=eq.${user.id}&verified=eq.true&select=artist_id,pop_at_call,pop_at_verify,artists(name,city,image_url)&order=verified_at.desc&limit=5`);
+      if (Array.isArray(rows) && rows.length) setBreakouts(rows);
+    })();
+  }, [user.id]);
+
+  function toggleVibe(v) { setVibes(p => p.includes(v) ? p.filter(x => x !== v) : [...p, v]); }
+
+  async function runEngine() {
+    if (!isPro && scoutsToday >= FREE_DAILY_SCOUTS) { setPaywall(true); return; }
+    setStage("loading"); setErr("");
+    try {
+      const inList = vibes.map(v => `"${v}"`).join(",");
+      const data = await sb.get(`artists?genre_tag=in.(${encodeURIComponent(inList)})&order=scouted_at.desc,buzz.desc&limit=${isPro ? 12 : 6}`);
+      if (!Array.isArray(data) || !data.length) { setErr("No fresh scouts yet — the engine refreshes daily. Try other vibes."); setStage("pick"); return; }
+      setScouted(data);
+      setStage("feed");
+    } catch { setErr("Engine choked. Hit retry."); setStage("pick"); }
+  }
+
+  async function callEarly(a) {
+    if (calls[a.id]) return;
+    if (!isPro && scoutsToday >= FREE_DAILY_SCOUTS) { setPaywall(true); return; }
+    const base = Math.max(5, Math.round((100 - a.buzz) / 4) + 8);
+    const pts = isPro ? base * 2 : base;
+    setCalls(p => ({ ...p, [a.id]: "early" }));
+    setScoutsToday(n => n + 1);
+    await sb.post("calls", {
+      user_id: user.id, artist_id: a.id,
+      pop_at_call: a.popularity, followers_at_call: a.followers,
+    }, "resolution=ignore-duplicates");
+    await sb.rpc("add_hype", { uid: user.id, pts });
+    await reloadProfile();
+    setCardArtist({ ...a, pts });
+  }
+
+  function pass(a) { setCalls(p => ({ ...p, [a.id]: "pass" })); }
+
+  return (
+    <React.Fragment>
+      <header style={S.header}>
+        <div>
+          <div style={S.logoSm}>HYPE<span style={{ color: ACCENT }}>·</span>ENGINE</div>
+          <div style={S.byline}>{user.email}{isPro ? <span style={S.proPill}>PRO</span> : null}</div>
+        </div>
+        <div style={S.rankBox}>
+          <div style={{ ...S.rankTier, color: tier.color }}>{tier.name}</div>
+          <div style={S.rankScore}>{score} <span style={{ opacity: .5, fontSize: 12 }}>HYPE</span></div>
+          {nextTier ? <div style={S.progWrap}><div style={{ ...S.progBar, width: `${Math.min(100, ((score - tier.min) / (nextTier.min - tier.min)) * 100)}%`, background: tier.color }} /></div> : null}
+          <div style={S.signout} onClick={signOut}>sign out</div>
+        </div>
+      </header>
+
+      {breakouts.length > 0 ? (
+        <div style={S.breakoutBar}>
+          🔥 VERIFIED BREAKOUT — you called <b>{breakouts[0].artists ? breakouts[0].artists.name : "an artist"}</b> at {breakouts[0].pop_at_call}, now {breakouts[0].pop_at_verify}.
+          <button style={S.breakoutBtn} onClick={() => setCardArtist({
+            name: breakouts[0].artists ? breakouts[0].artists.name : "Your pick", city: breakouts[0].artists ? breakouts[0].artists.city : "",
+            pts: 25, verified: true,
+          })}>FLEX IT</button>
+        </div>
+      ) : null}
+
+      {stage === "pick" ? (
+        <section style={S.section}>
+          <h1 style={S.h1}>What you bumpin'?</h1>
+          <p style={S.lede}>Pick your vibes. The engine pulls real unsigned artists about to break — call 'em early, bank Hype Points, climb to Oracle.</p>
+          {!isPro ? <div style={S.quota}>{FREE_DAILY_SCOUTS - scoutsToday} free calls left today · <span style={S.upLink} onClick={() => setPaywall(true)}>go unlimited →</span></div> : null}
+          <div style={S.vibeGrid}>
+            {SEED_VIBES.map(v => <button key={v} onClick={() => toggleVibe(v)} style={{ ...S.vibe, ...(vibes.includes(v) ? S.vibeOn : {}) }}>{v}</button>)}
+          </div>
+          {err ? <div style={S.err}>{err}</div> : null}
+          <button disabled={!vibes.length} onClick={runEngine} style={{ ...S.cta, width: "auto", padding: "16px 40px", opacity: vibes.length ? 1 : .4, marginTop: 8 }}>RUN THE ENGINE →</button>
+        </section>
+      ) : null}
+
+      {stage === "loading" ? (
+        <section style={S.section}><div className="pulse" style={S.loadBig}>SCOUTING THE UNDERGROUND…</div><div style={S.loadSub}>{vibes.join(" · ")}</div></section>
+      ) : null}
+
+      {stage === "feed" ? (
+        <section style={S.section}>
+          <div style={S.feedHead}><h2 style={S.h2}>Fresh from the underground</h2><button onClick={() => { setStage("pick"); setScouted([]); setVibes([]); }} style={S.reset}>↺ new scout</button></div>
+          <div style={S.cards}>
+            {scouted.map(a => {
+              const c = calls[a.id];
+              return (
+                <div key={a.id} style={{ ...S.card, ...(c === "early" ? S.cardEarly : c === "pass" ? S.cardPass : {}) }}>
+                  {a.image_url ? <div style={{ ...S.art, backgroundImage: `url(${a.image_url})` }} /> : null}
+                  <div style={S.cardBody}>
+                    <div style={S.cardTop}>
+                      <div style={S.artName}>{a.name}</div>
+                      <div style={S.buzz}><span style={{ color: a.buzz > 70 ? ACCENT : a.buzz > 40 ? "#ffb627" : "#37c871" }}>●</span> {a.buzz}</div>
+                    </div>
+                    {a.city ? <div style={S.city}>{a.city}</div> : null}
+                    <div style={S.momentum}><b>Momentum:</b> {a.momentum}</div>
+                    <div style={S.verdict}>"{a.verdict}"</div>
+                    <div style={S.stats}>{(a.followers || 0).toLocaleString()} followers · {(a.yt_velocity || 0).toLocaleString()} YT views/day</div>
+                    {!c ? (
+                      <div style={S.actions}>
+                        <button onClick={() => callEarly(a)} style={S.callBtn}>🔥 CALL IT EARLY</button>
+                        <button onClick={() => pass(a)} style={S.passBtn}>PASS</button>
+                      </div>
+                    ) : c === "early" ? <div style={S.calledTag}>✓ CALLED — snapshot saved</div> : <div style={S.passedTag}>passed</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
+      {cardArtist ? <FlexCard artist={cardArtist} tier={tier} onClose={() => setCardArtist(null)} /> : null}
+      {paywall ? <Paywall onClose={() => setPaywall(false)} /> : null}
+
+      <footer style={S.footer}>HYPE ENGINE © McBeeHive Group LLC · a TRIX$TER106 product · Los Angeles</footer>
+    </React.Fragment>
+  );
+}
+
+function FlexCard({ artist, tier, onClose }) {
+  return (
+    <div style={S.modalBg} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={S.modalWrap}>
+        <div style={S.flex}>
+          <div style={S.flexGrain} />
+          <div style={S.flexTop}>{artist.verified ? "✓ VERIFIED BREAKOUT" : "I CALLED IT FIRST"}</div>
+          <div style={S.flexName}>{artist.name}</div>
+          {artist.city ? <div style={S.flexCity}>{artist.city}</div> : null}
+          <div style={{ ...S.flexTier, color: tier.color }}>{tier.name} · +{artist.pts} HYPE</div>
+          <div style={S.flexBrand}>scouted on HYPE·ENGINE — TRIX$TER106</div>
+        </div>
+        <div style={S.flexActions}>
+          <button style={S.shareBtn} onClick={() => {
+            const txt = `I called ${artist.name} early on HYPE·ENGINE 🔥 ${artist.verified ? "VERIFIED breakout." : "watch this one blow."} #HypeEngine #TRIXSTER106`;
+            if (navigator.share) navigator.share({ text: txt }).catch(() => {});
+            else if (navigator.clipboard) navigator.clipboard.writeText(txt);
+          }}>SHARE THE FLEX</button>
+          <button style={S.closeBtn} onClick={onClose}>keep scouting</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Paywall({ onClose }) {
+  return (
+    <div style={S.modalBg} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ ...S.modalWrap, maxWidth: 420 }}>
+        <div style={S.payCard}>
+          <div style={S.payTop}>GO PRO SCOUT</div>
+          <div style={S.payPrice}>$9.99<span style={{ fontSize: 16, opacity: .5 }}>/mo</span></div>
+          <div style={S.payList}>
+            {["Unlimited scouting", "Verified breakout alerts", "2× Hype Point multiplier", "Kingmaker & Oracle tiers", "Early access to TRIXSTERBEATS drops"].map(f => (
+              <div key={f} style={S.payItem}><span style={{ color: ACCENT, fontWeight: 800, marginRight: 8 }}>→</span>{f}</div>
+            ))}
+          </div>
+          <a href={STRIPE_PRO_LINK} target="_blank" rel="noreferrer" style={S.payBtn}>UPGRADE NOW →</a>
+          <div style={S.switch} onClick={onClose}>maybe later</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const S = {
+  root: { fontFamily: "'Archivo',sans-serif", background: "#0a0a0c", color: "#f2f2f2", minHeight: "100vh", position: "relative", overflow: "hidden" },
+  grain: { position: "fixed", inset: 0, opacity: .04, pointerEvents: "none", backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9'/%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23n)'/%3E%3C/svg%3E\")" },
+  authWrap: { maxWidth: 420, margin: "0 auto", padding: "60px 24px", position: "relative", zIndex: 2 },
+  logo: { fontFamily: "'Bebas Neue'", fontSize: 46, letterSpacing: 2, textAlign: "center" },
+  authSub: { fontSize: 11, letterSpacing: 3, opacity: .5, textAlign: "center", marginTop: 4 },
+  authCard: { background: "linear-gradient(160deg,#15151a,#0e0e12)", border: "1px solid #222228", borderRadius: 18, padding: 32, marginTop: 28 },
+  authH: { fontFamily: "'Bebas Neue'", fontSize: 32, letterSpacing: .5, marginBottom: 20 },
+  input: { width: "100%", background: "#0d0d10", border: "1px solid #26262c", color: "#fff", padding: "14px 16px", borderRadius: 9, fontSize: 15, marginBottom: 12, outline: "none" },
+  cta: { width: "100%", background: ACCENT, color: "#fff", border: "none", padding: "16px", borderRadius: 9, fontSize: 16, fontWeight: 900, letterSpacing: .5 },
+  switch: { textAlign: "center", marginTop: 16, opacity: .55, fontSize: 14, cursor: "pointer" },
+  err: { color: ACCENT, fontSize: 14, marginBottom: 12, fontWeight: 600 },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "22px 24px", borderBottom: "1px solid #1c1c20", position: "relative", zIndex: 2, flexWrap: "wrap", gap: 14 },
+  logoSm: { fontFamily: "'Bebas Neue'", fontSize: 28, letterSpacing: 1.5 },
+  byline: { fontSize: 12, opacity: .5, marginTop: 2, display: "flex", alignItems: "center", gap: 8 },
+  proPill: { background: ACCENT, color: "#fff", fontSize: 10, fontWeight: 800, padding: "2px 8px", borderRadius: 50, letterSpacing: 1 },
+  rankBox: { textAlign: "right", minWidth: 160 },
+  rankTier: { fontFamily: "'Bebas Neue'", fontSize: 20, letterSpacing: 1 },
+  rankScore: { fontSize: 22, fontWeight: 800 },
+  progWrap: { height: 5, background: "#1c1c20", borderRadius: 3, marginTop: 6, overflow: "hidden" },
+  progBar: { height: "100%", borderRadius: 3, transition: "width .5s" },
+  signout: { fontSize: 11, opacity: .4, marginTop: 6, cursor: "pointer" },
+  breakoutBar: { background: "linear-gradient(90deg,#ff3b3b,#b00)", padding: "12px 24px", fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", position: "relative", zIndex: 2 },
+  breakoutBtn: { background: "#fff", color: "#b00", border: "none", padding: "7px 16px", borderRadius: 6, fontWeight: 800, fontSize: 12 },
+  section: { padding: "40px 24px", maxWidth: 1100, margin: "0 auto", position: "relative", zIndex: 2 },
+  h1: { fontFamily: "'Bebas Neue'", fontSize: 56, letterSpacing: 1, lineHeight: .95 },
+  lede: { fontSize: 16, opacity: .7, maxWidth: 540, marginTop: 12, lineHeight: 1.5 },
+  quota: { fontSize: 13, opacity: .7, marginTop: 16 },
+  upLink: { color: ACCENT, cursor: "pointer", fontWeight: 700 },
+  vibeGrid: { display: "flex", flexWrap: "wrap", gap: 10, margin: "28px 0" },
+  vibe: { background: "#141418", color: "#bbb", border: "1px solid #26262c", padding: "12px 18px", borderRadius: 50, fontSize: 14, fontWeight: 600 },
+  vibeOn: { background: ACCENT, color: "#fff", borderColor: ACCENT },
+  loadBig: { fontFamily: "'Bebas Neue'", fontSize: 46, letterSpacing: 2, color: ACCENT },
+  loadSub: { opacity: .5, marginTop: 8, letterSpacing: 1 },
+  feedHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24, flexWrap: "wrap", gap: 12 },
+  h2: { fontFamily: "'Bebas Neue'", fontSize: 36, letterSpacing: 1 },
+  reset: { background: "transparent", color: "#888", border: "1px solid #2a2a30", padding: "8px 16px", borderRadius: 6, fontSize: 13 },
+  cards: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(290px,1fr))", gap: 18 },
+  card: { background: "linear-gradient(160deg,#15151a,#0e0e12)", border: "1px solid #222228", borderRadius: 14, overflow: "hidden" },
+  cardEarly: { borderColor: "#37c871", boxShadow: "0 0 0 1px #37c87155" },
+  cardPass: { opacity: .45 },
+  art: { height: 150, backgroundSize: "cover", backgroundPosition: "center" },
+  cardBody: { padding: 20 },
+  cardTop: { display: "flex", justifyContent: "space-between", alignItems: "baseline" },
+  artName: { fontFamily: "'Bebas Neue'", fontSize: 26, letterSpacing: .5 },
+  buzz: { fontSize: 14, fontWeight: 700 },
+  city: { fontSize: 12, letterSpacing: 1, opacity: .5, textTransform: "uppercase", marginTop: 2 },
+  momentum: { fontSize: 13, opacity: .7, marginTop: 12, lineHeight: 1.4 },
+  verdict: { fontSize: 14, fontStyle: "italic", color: "#ffb627", marginTop: 10, lineHeight: 1.4 },
+  stats: { fontSize: 11, opacity: .45, marginTop: 12 },
+  actions: { display: "flex", gap: 8, marginTop: 16 },
+  callBtn: { flex: 1, background: ACCENT, color: "#fff", border: "none", padding: "12px", borderRadius: 8, fontWeight: 800, fontSize: 13 },
+  passBtn: { background: "#1c1c22", color: "#888", border: "none", padding: "12px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13 },
+  calledTag: { marginTop: 16, color: "#37c871", fontWeight: 800, fontSize: 13 },
+  passedTag: { marginTop: 16, color: "#666", fontSize: 13 },
+  modalBg: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 },
+  modalWrap: { width: "100%", maxWidth: 380 },
+  flex: { background: "linear-gradient(155deg,#1a0808,#0a0a0c 60%)", border: "1px solid #ff3b3b55", borderRadius: 18, padding: "38px 28px", textAlign: "center", position: "relative", overflow: "hidden" },
+  flexGrain: { position: "absolute", inset: 0, opacity: .06, backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='.9'/%3E%3C/filter%3E%3Crect width='80' height='80' filter='url(%23n)'/%3E%3C/svg%3E\")" },
+  flexTop: { fontFamily: "'Bebas Neue'", fontSize: 18, letterSpacing: 3, color: ACCENT },
+  flexName: { fontFamily: "'Bebas Neue'", fontSize: 46, letterSpacing: 1, lineHeight: .95, marginTop: 8 },
+  flexCity: { fontSize: 12, letterSpacing: 2, opacity: .6, textTransform: "uppercase", marginTop: 4 },
+  flexTier: { fontFamily: "'Bebas Neue'", fontSize: 20, letterSpacing: 1, marginTop: 18 },
+  flexBrand: { fontSize: 10, letterSpacing: 2, opacity: .4, marginTop: 22, textTransform: "uppercase" },
+  flexActions: { display: "flex", gap: 10, marginTop: 16 },
+  shareBtn: { flex: 1, background: ACCENT, color: "#fff", border: "none", padding: "14px", borderRadius: 8, fontWeight: 800, letterSpacing: 1 },
+  closeBtn: { background: "#1c1c22", color: "#999", border: "none", padding: "14px 20px", borderRadius: 8 },
+  payCard: { background: "linear-gradient(155deg,#1a0808,#0a0a0c 60%)", border: "1px solid #ff3b3b", borderRadius: 20, padding: "40px 32px", textAlign: "center" },
+  payTop: { fontFamily: "'Bebas Neue'", fontSize: 28, letterSpacing: 2, color: ACCENT },
+  payPrice: { fontSize: 56, fontWeight: 900, margin: "8px 0 20px" },
+  payList: { textAlign: "left", margin: "0 0 24px" },
+  payItem: { padding: "9px 0", opacity: .85, fontSize: 15, borderBottom: "1px solid #2a1414", display: "flex", alignItems: "center" },
+  payBtn: { display: "block", width: "100%", background: ACCENT, color: "#fff", textDecoration: "none", padding: "16px", borderRadius: 10, fontWeight: 900, letterSpacing: .5, textAlign: "center" },
+  footer: { textAlign: "center", fontSize: 11, opacity: .4, padding: "40px 20px", letterSpacing: .5, position: "relative", zIndex: 2 },
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
